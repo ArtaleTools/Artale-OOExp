@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>極致監控 - 座標修正精確版</title>
+    <script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
+    <style>
+        body { font-family: "Microsoft JhengHei", sans-serif; background: #111218; color: #e0e0e0; margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        #sidebar { width: 340px; background: #1a1c26; padding: 15px; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+        #canvas-container { flex-grow: 1; position: relative; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: contain; opacity: 0.1; }
+
+        /* 置中且低調的作者標籤 */
+        .author-tag-center { 
+            font-size: 11px; 
+            color: #888; 
+            text-align: center; /* 改為置中 */
+            padding: 2px 0; 
+            font-family: 'Consolas', monospace;
+            letter-spacing: 2px;
+            margin-bottom: 2px;
+            opacity: 0.6;
+            width: 100%;
+        }
+
+        .panel { background: #1e212b; border-radius: 8px; padding: 12px; border: 1px solid #2d313d; margin-bottom: 5px; }
+        .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px; }
+        .val { font-family: 'Consolas', monospace; color: #2ecc71; font-weight: bold; font-size: 16px; }
+        .label { color: #bbb; }
+
+        #drag-box { position: absolute; border: 2px solid #ff3e3e; background: rgba(255, 62, 62, 0.1); width: 180px; height: 50px; cursor: move; z-index: 999; box-sizing: border-box; outline: none; }
+        #resizer { width: 12px; height: 12px; background: #ff3e3e; position: absolute; right: -6px; bottom: -6px; cursor: nwse-resize; border-radius: 50%; }
+        #drag-box:focus { border-color: #f1c40f; background: rgba(241, 196, 15, 0.1); }
+
+        .ctrl-group { background: #1e212b; border-radius: 8px; padding: 12px; border: 1px solid #2d313d; }
+        input[type=range] { width: 100%; cursor: pointer; accent-color: #3498db; margin: 10px 0; }
+        #preview { width: 100%; background: #000; border: 1px solid #444; image-rendering: pixelated; margin: 5px 0; }
+        
+        button { background: #3498db; color: #fff; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; transition: 0.2s; font-size: 14px; margin-bottom: 2px; }
+        button:hover { background: #2980b9; }
+        .btn-pause { background: #f39c12; }
+        .btn-pause.running { background: #e74c3c; }
+        .btn-auto { background: #8e44ad; font-size: 10px; width: auto; padding: 4px 6px; margin: 0; border: 1px solid #ab47bc; box-shadow: 0 0 10px rgba(142,68,173,0.4); flex-shrink: 0; }
+        .btn-save-box { background: #27ae60; font-size: 11px; width: auto; padding: 2px 8px; margin: 0; }
+        
+        .status-box { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #444; }
+        .debug-text { font-size: 11px; font-family: monospace; margin-top: 4px; border-left: 2px solid #444; padding-left: 5px; }
+        .optimizing { color: #f1c40f !important; animation: blink 1s infinite; font-weight: bold; }
+        @keyframes blink { 50% { opacity: 0.5; } }
+        
+        .coord-display { position: absolute; bottom: -20px; left: 0; font-size: 10px; font-family: Consolas, monospace; color: #ff3e3e; white-space: nowrap; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="author-tag-center">製作: OOKouun</div>
+
+    <button id="mainBtn" onclick="start()">選取視窗</button>
+    <button id="pauseBtn" class="btn-pause" onclick="togglePause()">暫停統計</button>
+    <button class="btn-reset" style="background:#3d4250; font-size:13px;" onclick="resetData()">重置統計數據</button>
+
+    <div class="ctrl-group">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 5px;">
+            <button class="btn-auto" onclick="autoOptimize()">自動偵測最佳OCR</button>
+            <span style="font-size: 12px; white-space: nowrap;">💡 亮度: <b id="tVal">150</b></span>
+            <button id="invertBtn" style="background:#444; width:auto; padding:4px 6px; font-size:10px; margin:0; flex-shrink: 0;" onclick="toggleInvert()">反白: 關</button>
+        </div>
+
+        <div style="display: flex; gap: 4px; margin-bottom: 5px; flex-wrap: wrap;">
+            <button class="btn-save-box" style="flex: 1;" onclick="saveCustomBox()">💾 儲存紅框</button>
+            <button style="background:#444; width:auto; padding:2px 8px; font-size:11px; margin:0; flex: 1;" onclick="applyCustomBox()">還原紅框位置</button>
+        </div>
+        
+        <input type="range" id="threshold" min="80" max="225" value="150" oninput="updateT(this.value, true)">
+        <canvas id="preview" height="40"></canvas>
+        
+        <div class="debug-text" style="color: #888;">原始內容: <span id="raw-log">--</span></div>
+        <div class="debug-text" style="color: #5dade2; font-weight: bold;">提取數值: <span id="filter-log">--</span></div>
+        
+        <div class="status-box">
+            <div class="debug-text">引擎狀態: <span id="engine-status" style="color:#f1c40f">等待啟動...</span></div>
+            <div class="debug-text">OCR辨識信心度: <span id="ocr-conf" style="color:#eee">--</span></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="row">
+            <span class="label">統計時間</span>
+            <span id="stat-time" class="val" style="color:#eee">00:00:00</span>
+        </div>
+        <div class="row">
+            <span class="label">當前總經驗</span>
+            <span id="cur-exp" class="val" style="color:#3498db">0</span>
+        </div>
+        <div class="row">
+            <span class="label">累積獲得量</span>
+            <span id="total-gain" class="val">0</span>
+        </div>
+        
+        <div style="margin: 10px 0; border-top: 1px dashed #333;"></div>
+        
+        <div class="row">
+            <span class="label">每分鐘 EXP</span>
+            <span id="epm" class="val">0</span>
+        </div>
+        <div class="row">
+            <span class="label">預估 10 分鐘</span>
+            <span id="e10" class="val">0</span>
+        </div>
+        <div class="row">
+            <span class="label">預估 60 分鐘</span>
+            <span id="e60" class="val">0</span>
+        </div>
+    </div>
+
+    <div class="ctrl-group">
+        <div style="font-size: 13px;">⚡ 刷新率: <span id="gVal" style="color:#3498db">100</span> ms</div>
+        <input type="range" id="gap" min="4" max="500" value="100" oninput="updateG(this.value, true)">
+    </div>
+</div>
+
+<div id="canvas-container">
+    <video id="v" autoplay playsinline></video>
+    <div id="drag-box" tabindex="0">
+        <div id="resizer"></div>
+        <div id="coord-display" class="coord-display">X:0, Y:0</div>
+    </div>
+</div>
+
+<script>
+    const v = document.getElementById('v'), box = document.getElementById('drag-box'), pre = document.getElementById('preview');
+    const preCtx = pre.getContext('2d', { willReadFrequently: true });
+    const coordEl = document.getElementById('coord-display');
+    let history = [], worker = null, isRunning = false, isPaused = false, isInverted = false;
+    let startTime = null, totalPausedTime = 0, pauseStartedAt = null;
+    let lastValidExp = 0, initialExp = 0, currentGap = 100, isOptimizing = false;
+
+    function updateCoordDisplay() {
+        const x = parseInt(box.style.left) || 0;
+        const y = parseInt(box.style.top) || 0;
+        coordEl.innerText = `X:${x}, Y:${y}`;
+    }
+
+    function saveSettings() {
+        const config = {
+            t: document.getElementById('threshold').value,
+            g: document.getElementById('gap').value,
+            inv: isInverted,
+            box: { t: box.style.top, l: box.style.left, w: box.style.width, h: box.style.height }
+        };
+        localStorage.setItem('ocr_config_v4', JSON.stringify(config));
+    }
+
+    function saveCustomBox() {
+        const customBox = { t: box.style.top, l: box.style.left, w: box.style.width, h: box.style.height };
+        localStorage.setItem('v4_custom_box', JSON.stringify(customBox));
+        const btn = document.querySelector('.btn-save-box');
+        btn.innerText = "✅ 已儲存位置";
+        setTimeout(() => btn.innerText = "💾 儲存紅框", 1500);
+    }
+
+    function applyCustomBox() {
+        const saved = JSON.parse(localStorage.getItem('v4_custom_box'));
+        if (saved) { 
+            box.style.top = saved.t;
+            box.style.left = saved.l;
+            box.style.width = saved.w;
+            box.style.height = saved.h;
+            updateCoordDisplay();
+            setTimeout(() => { renderPreview(); saveSettings(); }, 50); 
+        } else {
+            alert("請先調整好紅框位置並點擊『儲存紅框』");
+        }
+    }
+
+    function loadSettings() {
+        const saved = JSON.parse(localStorage.getItem('ocr_config_v4'));
+        const custom = JSON.parse(localStorage.getItem('v4_custom_box'));
+        if (saved) {
+            let t = parseInt(saved.t);
+            if (t < 80 || t > 225) t = 150;
+            updateT(t, false);
+            updateG(saved.g, false);
+            isInverted = saved.inv;
+            document.getElementById('invertBtn').innerText = `反白: ${isInverted ? '開' : '關'}`;
+            if (custom) {
+                box.style.top = custom.t;
+                box.style.left = custom.l;
+                box.style.width = custom.w;
+                box.style.height = custom.h;
+            } else if (saved.box) {
+                Object.assign(box.style, saved.box);
+            }
+            updateCoordDisplay();
+        } else { updateT(150, false); updateG(100, false); }
+    }
+
+    function updateT(val, shouldSave) { 
+        document.getElementById('tVal').innerText = val; 
+        document.getElementById('threshold').value = val;
+        renderPreview(); 
+        if(shouldSave) saveSettings(); 
+    }
+    
+    function updateG(val, shouldSave) { 
+        document.getElementById('gVal').innerText = val; 
+        document.getElementById('gap').value = val;
+        currentGap = parseInt(val); 
+        if(shouldSave) saveSettings(); 
+    }
+
+    function toggleInvert() { 
+        isInverted = !isInverted; 
+        document.getElementById('invertBtn').innerText = `反白: ${isInverted ? '開' : '關'}`; 
+        renderPreview(); 
+        saveSettings(); 
+    }
+
+    async function autoOptimize() {
+        if (!isRunning || isOptimizing) return;
+        isOptimizing = true;
+        const statusEl = document.getElementById('engine-status');
+        const confEl = document.getElementById('ocr-conf');
+        statusEl.classList.add('optimizing');
+        let bestT = 150, maxConf = 0, bestInv = false;
+        for (let invState of [true, false]) {
+            isInverted = invState;
+            renderPreview();
+            for (let t = 80; t <= 225; t += 1) {
+                updateT(t, false);
+                await new Promise(r => setTimeout(r, 35)); 
+                const { data: { confidence } } = await worker.recognize(pre);
+                if (confidence > maxConf) { maxConf = confidence; bestT = t; bestInv = invState; }
+                statusEl.innerText = `掃描中 | 最高: ${maxConf}%`;
+                confEl.innerText = `${confidence}%`;
+                if (maxConf >= 99) break;
+            }
+            if (maxConf >= 99) break;
+        }
+        isInverted = bestInv;
+        document.getElementById('invertBtn').innerText = `反白: ${isInverted ? '開' : '關'}`;
+        updateT(bestT, true);
+        statusEl.classList.remove('optimizing');
+        statusEl.innerText = "優化完成";
+        setTimeout(() => { isOptimizing = false; statusEl.innerText = "運作中"; loop(); }, 2000);
+    }
+
+    async function start() {
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+            v.srcObject = stream;
+            if(!worker) {
+                worker = await Tesseract.createWorker('eng');
+                await worker.setParameters({ tessedit_char_whitelist: '0123456789[%]. ', tessedit_pageseg_mode: Tesseract.PSM.SINGLE_LINE });
+            }
+            startTime = Date.now(); totalPausedTime = 0; isRunning = true; isPaused = false;
+            document.getElementById('mainBtn').innerText = "視窗已連線";
+            document.getElementById('engine-status').innerText = "運作中";
+            loop();
+            setInterval(() => {
+                if(!startTime || isPaused) return;
+                const diff = Math.floor((Date.now() - startTime - totalPausedTime) / 1000);
+                document.getElementById('stat-time').innerText = new Date(diff * 1000).toISOString().substr(11, 8);
+            }, 1000);
+        } catch(e) { document.getElementById('engine-status').innerText = "啟動失敗"; }
+    }
+
+    async function loop() {
+        if (!isRunning || isPaused || isOptimizing) return;
+        if (!renderPreview()) { setTimeout(loop, 500); return; }
+        try {
+            const { data: { text, confidence } } = await worker.recognize(pre);
+            document.getElementById('ocr-conf').innerText = confidence + "%";
+            let cleanText = text.trim();
+
+            cleanText = cleanText.replace(/\s+/g, '');
+            cleanText = cleanText.replace(/\(/g, '[');
+            cleanText = cleanText.replace(/\[(\d+\.?\d*)%[^\]]*\]?/, '[$1%]');
+            document.getElementById('raw-log').innerText = cleanText;
+
+            const expMatch = cleanText.match(/^(\d+)/);
+            const exp = expMatch ? expMatch[1] : "";
+            const percentMatch = cleanText.match(/\[(\d+\.?\d*)%\]/);
+            const percent = percentMatch ? percentMatch[1] : "";
+            document.getElementById('filter-log').innerText = exp ? `${exp} [${percent}%]` : "--";
+
+            const nowE = parseInt(exp);
+            const statusEl = document.getElementById('engine-status');
+
+            if (!isNaN(nowE) && nowE > 0) {
+                if (lastValidExp === 0) { initialExp = nowE; lastValidExp = nowE; }
+                const delta = nowE - lastValidExp;
+                if (delta > 1000000) {
+                    statusEl.innerText = "異常跳轉 (已忽略)";
+                    statusEl.style.color = "#ff3e3e";
+                    setTimeout(() => { if(!isPaused) statusEl.style.color = "#f1c40f"; }, 2000);
+                } 
+                else if (delta >= 0) {
+                    statusEl.innerText = "運作中";
+                    statusEl.style.color = "#2ecc71";
+                    lastValidExp = nowE;
+                    const nowT = Date.now();
+                    history.push({ t: nowT, v: nowE });
+                    history = history.filter(item => nowT - item.t <= 600000);
+                    document.getElementById('cur-exp').innerText = nowE.toLocaleString();
+                    document.getElementById('total-gain').innerText = (nowE - initialExp).toLocaleString();
+                    if (history.length > 1) {
+                        const f = history[0], l = history[history.length - 1];
+                        const dE = l.v - f.v, dM = (l.t - f.t) / 60000;
+                        const epm = dM > 0 ? Math.floor(dE / dM) : 0;
+                        document.getElementById('epm').innerText = epm.toLocaleString();
+                        document.getElementById('e10').innerText = (epm * 10).toLocaleString();
+                        document.getElementById('e60').innerText = (epm * 60).toLocaleString();
+                    }
+                }
+            }
+        } catch (e) { console.error(e); }
+        setTimeout(loop, currentGap);
+    }
+
+    function renderPreview() {
+        if (v.readyState < 2) return false;
+        
+        const b = box.getBoundingClientRect();
+        const vR = v.getBoundingClientRect();
+
+        const videoRatio = v.videoWidth / v.videoHeight;
+        let actualContentW, actualContentH;
+        
+        if (vR.width / vR.height > videoRatio) {
+            actualContentH = vR.height;
+            actualContentW = vR.height * videoRatio;
+        } else {
+            actualContentW = vR.width;
+            actualContentH = vR.width / videoRatio;
+        }
+
+        const offsetX = (vR.width - actualContentW) / 2;
+        const offsetY = (vR.height - actualContentH) / 2;
+
+        const rx = v.videoWidth / actualContentW;
+        const ry = v.videoHeight / actualContentH;
+
+        const sx = (b.left - vR.left - offsetX) * rx;
+        const sy = (b.top - vR.top - offsetY) * ry;
+        const sw = b.width * rx;
+        const sh = b.height * ry;
+
+        pre.width = Math.max(1, b.width * 2); 
+        pre.height = Math.max(1, b.height * 2);
+
+        preCtx.clearRect(0, 0, pre.width, pre.height);
+        
+        try {
+            preCtx.drawImage(v, sx, sy, sw, sh, 0, 0, pre.width, pre.height);
+        } catch(e) { return false; }
+
+        let img = preCtx.getImageData(0, 0, pre.width, pre.height), d = img.data, th = parseInt(document.getElementById('threshold').value);
+        for (let i = 0; i < d.length; i += 4) {
+            let g = (d[i] + d[i+1] + d[i+2]) / 3 > th ? 255 : 0;
+            if (isInverted) g = 255 - g;
+            d[i] = d[i+1] = d[i+2] = g;
+        }
+        preCtx.putImageData(img, 0, 0); 
+        return true;
+    }
+
+    function togglePause() {
+        if (!isRunning) return;
+        isPaused = !isPaused;
+        const btn = document.getElementById('pauseBtn');
+        if (isPaused) { btn.innerText = "恢復統計"; btn.classList.add('running'); pauseStartedAt = Date.now(); }
+        else { btn.innerText = "暫停統計"; btn.classList.remove('running'); if (pauseStartedAt) totalPausedTime += (Date.now() - pauseStartedAt); pauseStartedAt = null; loop(); }
+    }
+
+    function resetData() {
+        history = []; startTime = Date.now(); totalPausedTime = 0; lastValidExp = 0; initialExp = 0;
+        document.querySelectorAll('.val').forEach(el => el.innerText = "0");
+        document.getElementById('stat-time').innerText = "00:00:00";
+    }
+
+    let isDragging = false, isResizing = false, sx, sy, sw, sh, sl, st;
+    box.onmousedown = (e) => { 
+        if (e.target.id === 'resizer') isResizing = true; 
+        else isDragging = true; 
+        sx = e.clientX; sy = e.clientY; 
+        sw = box.offsetWidth; sh = box.offsetHeight; 
+        sl = parseInt(box.style.left) || 0; 
+        st = parseInt(box.style.top) || 0; 
+        e.preventDefault(); 
+        box.focus(); 
+    };
+    
+    document.onmousemove = (e) => { 
+        if (isDragging) { 
+            box.style.left = (sl + e.clientX - sx) + 'px'; 
+            box.style.top = (st + e.clientY - sy) + 'px'; 
+            updateCoordDisplay();
+        } 
+        else if (isResizing) { 
+            box.style.width = Math.max(10, sw + e.clientX - sx) + 'px'; 
+            box.style.height = Math.max(10, sh + e.clientY - sy) + 'px'; 
+        } 
+        if (isDragging || isResizing) renderPreview(); 
+    };
+    
+    document.onmouseup = () => { 
+        if(isDragging || isResizing) saveSettings(); 
+        isDragging = isResizing = false; 
+    };
+
+    box.onkeydown = (e) => {
+        if (!isRunning || isOptimizing) return;
+        const step = e.shiftKey ? 10 : 1;
+        let moved = false;
+        let currentLeft = parseInt(box.style.left) || 0;
+        let currentTop = parseInt(box.style.top) || 0;
+        switch(e.key) {
+            case 'ArrowLeft':  box.style.left = (currentLeft - step) + 'px'; moved = true; break;
+            case 'ArrowRight': box.style.left = (currentLeft + step) + 'px'; moved = true; break;
+            case 'ArrowUp':    box.style.top = (currentTop - step) + 'px';  moved = true; break;
+            case 'ArrowDown':  box.style.top = (currentTop + step) + 'px';  moved = true; break;
+            default: return; 
+        }
+        if (moved) {
+            e.preventDefault();
+            updateCoordDisplay();
+            renderPreview();
+            saveSettings();
+        }
+    };
+
+    window.onload = loadSettings;
+</script>
+</body>
+</html>
